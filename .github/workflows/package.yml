@@ -46,6 +46,19 @@ jobs:
           ref: 563595abedfdfa413ad583b66b6176d82007e633 # update UniXNU pin (fixes turnip-frame-diagnostics.patch)
           path: UniXNU
           submodules: recursive
+      - name: patch UniXNU metal bridge for ios27
+        run: |
+          cp device/.github/patches/0065-ios-read-pages-and-mapped-writable.patch \
+             UniXNU/drivers/AdrenoMetal/bridge/patches/
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('UniXNU/scripts/build-adreno-metal-bridge.py')
+          text = p.read_text()
+          old = "'0064-copies-leave-unreachable-pages-alone.patch']]"
+          new = "'0064-copies-leave-unreachable-pages-alone.patch',\n    '0065-ios-read-pages-and-mapped-writable.patch']]"
+          assert old in text, 'expected patch list in build-adreno-metal-bridge.py'
+          p.write_text(text.replace(old, new, 1))
+          PY
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/uefi-sheng
