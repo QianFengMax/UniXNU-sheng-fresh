@@ -56,8 +56,6 @@ jobs:
           brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
           {
             echo "$HOME/.cargo/bin"
-            echo "/opt/homebrew/opt/llvm/bin"
-            echo "/opt/homebrew/opt/lld/bin"
             echo "/opt/homebrew/opt/bison/bin"
           } >> "$GITHUB_PATH"
           rustup toolchain install 1.98.0 --profile minimal --component rust-src
@@ -162,3 +160,20 @@ jobs:
             UniXNU/out/sheng/*/*/payload/payload.img
             UniXNU/out/sheng/*/*/kernel/kernel.macho
             UniXNU/out/sheng/*/*/package.manifest.json
+      - name: print failure logs
+        if: failure()
+        run: |
+          for f in UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log UniXNU/out/sheng/*/*/logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (tail) ==="
+            tail -n 120 "$f"
+          done
+      - name: build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ inputs.os }}
+          retention-days: 1
+          path: |
+            UniXNU/out/sheng/*/*/logs/*.log
+            UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log
