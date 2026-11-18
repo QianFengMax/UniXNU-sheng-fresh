@@ -137,6 +137,19 @@ jobs:
         working-directory: device
         run: |
           python3 scripts/extract-files.py
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          lock = json.loads(pathlib.Path('drivers/Ath12kWifi/tools/source-lock.json').read_text())
+          src = lock['freebsd']
+          dst = pathlib.Path('drivers/Ath12kWifi/deps/freebsd')
+          if not dst.exists():
+              dst.mkdir(parents=True, exist_ok=True)
+              subprocess.run(['git', '-C', str(dst), 'init'], check=True)
+              subprocess.run(['git', '-C', str(dst), 'remote', 'add', 'origin', src['url']], check=True)
+              subprocess.run(['git', '-C', str(dst), 'sparse-checkout', 'init'], check=True)
+              subprocess.run(['git', '-C', str(dst), 'fetch', '--depth', '1', '--filter=blob:none', 'origin', src['commit']], check=True)
+              subprocess.run(['git', '-C', str(dst), 'checkout', 'FETCH_HEAD'], check=True)
+          PY
           python3 drivers/Ath12kWifi/tools/fetch-sources.py
       - name: package
         working-directory: device
