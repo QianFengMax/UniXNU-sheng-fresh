@@ -194,7 +194,7 @@ jobs:
       - name: print failure logs
         if: failure()
         run: |
-          for f in UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log UniXNU/out/sheng/*/*/logs/*.log; do
+          for f in UniXNU/out/sheng/*/*/kernel/*.failed.json UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log UniXNU/out/sheng/*/*/logs/*.log; do
             [ -f "$f" ] || continue
             echo "=== $f (tail) ==="
             tail -n 120 "$f"
@@ -207,4 +207,5 @@ jobs:
           retention-days: 1
           path: |
             UniXNU/out/sheng/*/*/logs/*.log
+            UniXNU/out/sheng/*/*/kernel/*.json
             UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log
