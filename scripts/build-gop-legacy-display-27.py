@@ -379,7 +379,11 @@ extern "C" int boot_progress_prepare_scanout(void) {return 1;}
 extern "C" void boot_progress_cancel_scanout(void) {}
 extern "C" void boot_progress_stage(const char *) {}
 extern "C" int boot_progress_pulse_anchor(uintptr_t,uint64_t,unsigned,unsigned,unsigned) {return 0;}
-''')
+''' + ('' if MACOS else '''
+// Non-macOS kernels lack the macOS gpupool-device-pager-close and payload-addon-release patches referenced weakly by Adreno740 and RamBlock.
+extern "C" IOReturn iokit_physical_descriptor_close_notify(void *,void (*)(void *),void *) {return kIOReturnUnsupported;}
+extern "C" bool ml_static_mfree_prepare(uintptr_t,size_t) {return false;}
+'''))
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 # The keystore state service (AppleKeyStoreState) and its probe, unchanged from iPadOS 17.
 keystore_source = ROOT / 'kits/sheng/KeyStoreProbe.cpp'
