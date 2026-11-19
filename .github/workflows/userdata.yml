@@ -1,0 +1,70 @@
+name: userdata
+
+# Build only the userdata-root.img (and userdata-root.json) for an OS profile on a
+# macOS runner (using macOS /usr/bin/aea, /usr/bin/hdiutil and blacktop/tap/ipsw)
+# and upload it compressed with zstd (--sparse).
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the userdata root image"
+        type: choice
+        options: ["27", "26", "17"]
+        default: "27"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: userdata-${{ github.ref }}-${{ inputs.os }}
+  cancel-in-progress: true
+
+jobs:
+  userdata:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      UNIXNU_IPSW_JOBS: 16
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 563595abedfdfa413ad583b66b6176d82007e633
+          path: UniXNU
+          submodules: false
+      - name: tools
+        run: |
+          brew install blacktop/tap/ipsw zstd
+          df -h
+      - name: build userdata
+        env:
+          OS_PROFILE: ${{ inputs.os }}
+        run: |
+          python3 UniXNU/unixnu build userdata -D device --os "$OS_PROFILE"
+          df -h
+          # Reclaim ~20 GiB of extracted/decrypted IPSW archives before compressing.
+          rm -rf UniXNU/out/ipsw
+          mkdir -p artifacts
+          img=$(ls UniXNU/out/sheng/*/*/userdata/userdata-root.img)
+          meta=$(ls UniXNU/out/sheng/*/*/userdata/userdata-root.json)
+          cp "$meta" artifacts/userdata-root.json
+          zstd -T0 -3 --sparse "$img" -o artifacts/userdata-root.img.zst
+          rm -f "$img"
+          ls -lh artifacts/
+          df -h
+      - name: upload userdata
+        uses: actions/upload-artifact@v4
+        with:
+          name: userdata-root-${{ inputs.os }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            artifacts/userdata-root.img.zst
+            artifacts/userdata-root.json
