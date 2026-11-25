@@ -1,0 +1,232 @@
+name: sheng flashable images (persistent boot)
+
+# Build the flashable UniXNU image set for Xiaomi Pad 6S Pro (sheng, SM8550, 8G+256G)
+# with the most complete support: iPadOS 27.0.1 (24A446) profile, all default board
+# components, and the firmware watchdog taken over so the flashed image runs without a PC.
+#
+# Based on the verified clean-runner pipeline (device main + the 15 fixes that make
+# package.yml work on macos-26 + UniXNU 563595ab + the ios27 metal bridge patch),
+# plus one addition this repository's default iPadOS 27 command line lacks:
+#   --kernel-arg uefi-watchdog=1
+# The firmware (SHENG_BOOT_GUARD) arms a 30 s Gunyah watchdog and hands it to XNU at
+# ExitBootServices; without the takeover a flashed image resets 30 s after handoff.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options: ["27", "26", "17"]
+        default: "27"
+      init_data:
+        description: "Create a NEW installation seed (first installation)"
+        type: boolean
+        default: true
+      watchdog:
+        description: "Add uefi-watchdog=1 (required to run without the PC)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sheng-flash-${{ github.ref }}-${{ inputs.os }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 563595abedfdfa413ad583b66b6176d82007e633
+          path: UniXNU
+          submodules: recursive
+      - name: patch UniXNU metal bridge for ios27
+        run: |
+          cp device/.github/patches/0065-ios-read-pages-and-mapped-writable.patch \
+             UniXNU/drivers/AdrenoMetal/bridge/patches/
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('UniXNU/scripts/build-adreno-metal-bridge.py')
+          text = p.read_text()
+          old = "'0064-copies-leave-unreachable-pages-alone.patch']]"
+          new = "'0064-copies-leave-unreachable-pages-alone.patch',\n    '0065-ios-read-pages-and-mapped-writable.patch']]"
+          assert old in text, 'expected patch list in build-adreno-metal-bridge.py'
+          p.write_text(text.replace(old, new, 1))
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-sheng
+          submodules: recursive
+      - name: tools
+        run: |
+          brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
+          {
+            echo "$HOME/.cargo/bin"
+            echo "/opt/homebrew/opt/bison/bin"
+          } >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          ok=1
+          for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput aea compression_tool \
+                   mformat mcopy ipsw; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          for t in lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy; do
+            [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+      - name: platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the platform seed of the device, 8 hex digits.' >&2
+            exit 1
+          fi
+      - name: seed cache identity
+        id: seed-key
+        env:
+          SEED: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('key=data-seed-v1-' + hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16] + '\n')
+          PY
+      - uses: actions/cache/restore@v4
+        id: data-cache
+        if: inputs.os == '27'
+        with:
+          path: |
+            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr
+            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/inputs.json
+          key: ${{ steps.seed-key.outputs.key }}-${{ inputs.os }}
+      - name: prepare preserved Data seed
+        if: inputs.os == '27'
+        env:
+          INIT_DATA: ${{ inputs.init_data }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          inputs = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())['inputs']
+          path = pathlib.Path('UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr')
+          if not path.is_file() and os.environ['INIT_DATA'] != 'true':
+              raise SystemExit('No saved seed. Select init_data for a FIRST installation')
+          PY
+      - name: prepare device sources and firmware
+        working-directory: device
+        run: |
+          python3 scripts/extract-files.py
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          lock = json.loads(pathlib.Path('drivers/Ath12kWifi/tools/source-lock.json').read_text())
+          src = lock['freebsd']
+          dst = pathlib.Path('drivers/Ath12kWifi/deps/freebsd')
+          if not dst.exists():
+              dst.mkdir(parents=True, exist_ok=True)
+              subprocess.run(['git', '-C', str(dst), 'init'], check=True)
+              subprocess.run(['git', '-C', str(dst), 'remote', 'add', 'origin', src['url']], check=True)
+              subprocess.run(['git', '-C', str(dst), 'sparse-checkout', 'init'], check=True)
+              subprocess.run(['git', '-C', str(dst), 'fetch', '--depth', '1', '--filter=blob:none', 'origin', src['commit']], check=True)
+              subprocess.run(['git', '-C', str(dst), 'checkout', 'FETCH_HEAD'], check=True)
+          PY
+          python3 drivers/Ath12kWifi/tools/fetch-sources.py
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INIT_DATA: ${{ inputs.init_data }}
+          OS_PROFILE: ${{ inputs.os }}
+          WATCHDOG: ${{ inputs.watchdog }}
+        run: |
+          set -e
+          args=(--os "$OS_PROFILE" --uefi ../uefi-sheng)
+          if [ "$OS_PROFILE" = 27 ] && [ "$INIT_DATA" = true ]; then
+            args+=(--init-data)
+          fi
+          if [ "$WATCHDOG" = true ]; then
+            args+=(--kernel-arg uefi-watchdog=1)
+          fi
+          echo "package.sh ${args[*]}"
+          scripts/package.sh "${args[@]}"
+      - name: verify the image is fit for a flashed slot
+        if: always()
+        run: |
+          set -e
+          BOOT=$(find UniXNU/out -maxdepth 6 -type f -name boot.img | head -1)
+          MAN=$(find UniXNU/out -maxdepth 6 -type f -name package.manifest.json | head -1)
+          echo "boot.img : ${BOOT:-MISSING}"
+          echo "manifest : ${MAN:-MISSING}"
+          [ -n "$BOOT" ] || { echo "::error::no boot.img produced"; exit 1; }
+          SIZE=$(stat -f %z "$BOOT")
+          LIMIT=201326592
+          echo "boot.img size = $SIZE bytes (boot_b limit $LIMIT)"
+          [ "$SIZE" -le "$LIMIT" ] || { echo "::error::boot.img exceeds the 192 MiB boot_b slot"; exit 1; }
+          python3 - "$MAN" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          cmd = m.get("kernel_command_line", "")
+          print("kernel_command_line_bytes =", m.get("kernel_command_line_bytes", len(cmd)))
+          print("uefi-watchdog=1 :", "uefi-watchdog=1" in cmd)
+          print("autoreset=      :", "autoreset=" in cmd)
+          print("os_profile      :", m.get("os_profile"))
+          print("configuration   :", m.get("configuration"))
+          ok = "uefi-watchdog=1" in cmd and "autoreset=" not in cmd
+          sys.exit(0 if ok else 1)
+          PY
+      - uses: actions/cache/save@v4
+        if: always() && inputs.os == '27' && steps.data-cache.outputs.cache-hit != 'true' && hashFiles('UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr') != ''
+        with:
+          path: |
+            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr
+            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/inputs.json
+          key: ${{ steps.seed-key.outputs.key }}-${{ inputs.os }}
+      - name: installation seed backup
+        if: always() && inputs.os == '27' && hashFiles('UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: installation-seed-${{ inputs.os }}
+          retention-days: 5
+          path: |
+            UniXNU/out/sheng/*/*/runtime/data.dbr
+            UniXNU/out/sheng/*/*/runtime/inputs.json
+      - name: images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ inputs.os }}
+          retention-days: 5
+          if-no-files-found: error
+          path: |
+            UniXNU/out/sheng/*/*/boot/boot.img
+            UniXNU/out/sheng/*/*/payload/payload.img
+            UniXNU/out/sheng/*/*/kernel/kernel.macho
+            UniXNU/out/sheng/*/*/package.manifest.json
+      - name: print failure logs
+        if: failure()
+        run: |
+          for f in UniXNU/out/sheng/*/*/kernel/*.failed.json UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log UniXNU/out/sheng/*/*/logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (tail) ==="
+            tail -n 120 "$f"
+          done
+      - name: build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ inputs.os }}
+          retention-days: 5
+          path: |
+            UniXNU/out/sheng/*/*/logs/*.log
+            UniXNU/out/sheng/*/*/kernel/*.json
+            UniXNU/out/sheng/*/*/tree/build/adreno-metal-bridge/build-*.log
