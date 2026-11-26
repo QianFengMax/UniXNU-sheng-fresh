@@ -23,10 +23,11 @@ concurrency:
 jobs:
   userdata:
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       UNIXNU_IPSW_JOBS: 16
       HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +48,16 @@ jobs:
         env:
           OS_PROFILE: ${{ inputs.os }}
         run: |
-          python3 UniXNU/unixnu build userdata -D device --os "$OS_PROFILE"
+          set -o pipefail
+          df -h
+          python3 UniXNU/unixnu build userdata -D device --os "$OS_PROFILE" 2>&1 | tee /tmp/userdata-build.log
+          status=$?
+          df -h
+          echo "userdata build exit=$status"
+          exit $status
+      - name: package the image
+        run: |
+          set -e
           df -h
           # Reclaim ~20 GiB of extracted/decrypted IPSW archives before compressing.
           rm -rf UniXNU/out/ipsw
@@ -63,8 +73,29 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: userdata-root-${{ inputs.os }}
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
           path: |
             artifacts/userdata-root.img.zst
             artifacts/userdata-root.json
+      - name: failure diagnostics
+        if: failure()
+        run: |
+          echo "=== df -h ==="
+          df -h
+          echo "=== build log tail ==="
+          tail -n 200 /tmp/userdata-build.log 2>/dev/null || echo "(no build log)"
+          echo "=== out tree ==="
+          find UniXNU/out -maxdepth 5 2>/dev/null | head -80
+          echo "=== firmware cache ==="
+          ls -la device/.cache/firmware 2>/dev/null | head -40
+          echo "=== target volumes ==="
+          ls -la UniXNU/out/ipsw 2>/dev/null | head -20
+      - name: upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: userdata-logs-${{ inputs.os }}
+          retention-days: 5
+          path: |
+            /tmp/userdata-build.log
